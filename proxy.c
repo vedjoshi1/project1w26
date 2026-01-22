@@ -111,7 +111,7 @@ int main(int argc, char *argv[]) {
         if (ssl != NULL) {
             handle_request(ssl);
         }
-        
+        //shut down ssl connection
         SSL_shutdown(ssl);
         SSL_free(ssl);
         
@@ -119,6 +119,7 @@ int main(int argc, char *argv[]) {
     }
 
     close(server_socket);
+    //shut down ssl context
     if (ssl_ctx != NULL) {
         SSL_CTX_free(ssl_ctx);
     }

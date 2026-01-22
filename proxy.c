@@ -30,13 +30,28 @@ int main(int argc, char *argv[]) {
     socklen_t client_len;
 
     parse_args(argc, argv);
-
-    // TODO: Initialize OpenSSL library
-    
-    
-    // TODO: Create SSL context and load certificate/private key files
-    // Files: "server.crt" and "server.key"
-    SSL_CTX *ssl_ctx = NULL;
+    //implements openssl initialization
+    if (OPENSSL_init_ssl(0, NULL) != 1) {
+        fprintf(stderr, "Error: OpenSSL initialization failed\n");
+        exit(EXIT_FAILURE);
+    }
+    //sets up ssl context
+    SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_server_method());
+    if (ssl_ctx == NULL) {
+        fprintf(stderr, "Error: SSL_CTX_new failed\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_certificate_file(ssl_ctx, "server.crt", SSL_FILETYPE_PEM) != 1) {
+        fprintf(stderr, "Error: Failed to load certificate file\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, "server.key", SSL_FILETYPE_PEM) != 1) {
+        fprintf(stderr, "Error: Failed to load private key file\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
     
     if (ssl_ctx == NULL) {
         fprintf(stderr, "Error: SSL context not initialized\n");
@@ -76,23 +91,37 @@ int main(int argc, char *argv[]) {
         }
         
         printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-        
-        // TODO: Create SSL structure for this connection and perform SSL handshake
-        SSL *ssl = NULL;
+        //implement create ssl structure and make handshake
+        SSL *ssl = SSL_new(ssl_ctx);
+        if (ssl == NULL) {
+            ERR_print_errors_fp(stderr);
+            close(client_socket);
+            continue;
+        }
+
+        SSL_set_fd(ssl, client_socket);
+        if (SSL_accept(ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            close(client_socket);
+            continue;
+        }
         
         
         if (ssl != NULL) {
             handle_request(ssl);
         }
         
-        // TODO: Clean up SSL connection
-        
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
         
         close(client_socket);
     }
 
     close(server_socket);
-    // TODO: Clean up SSL context
+    if (ssl_ctx != NULL) {
+        SSL_CTX_free(ssl_ctx);
+    }
     
     return 0;
 }

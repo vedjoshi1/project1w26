@@ -8,20 +8,48 @@
 #include <openssl/err.h>
 
 #define BUFFER_SIZE 1024
-#define LOCAL_PORT_TO_CLIENT 8443
-#define REMOTE_HOST "127.0.0.1"
-#define REMOTE_PORT 5001
+#define DEFAULT_LOCAL_PORT 8443
+#define DEFAULT_REMOTE_HOST "127.0.0.1"
+#define DEFAULT_REMOTE_PORT 5001
+
+static int local_port = DEFAULT_LOCAL_PORT;
+static char remote_host[256] = DEFAULT_REMOTE_HOST;
+static int remote_port = DEFAULT_REMOTE_PORT;
 
 void handle_request(SSL *ssl);
 void send_local_file(SSL *ssl, const char *path);
 void proxy_remote_file(SSL *ssl, const char *request);
 int file_exists(const char *filename);
+void url_decode(const char *src, char *dst, size_t dst_size);
 
 // TODO: Parse command-line arguments (-b/-r/-p) and override defaults.
 // Keep behavior consistent with the project spec.
 void parse_args(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    int opt;
+    while ((opt = getopt(argc, argv, "b:r:p:")) != -1) {
+        switch (opt) {
+            case 'b':
+                local_port = atoi(optarg);
+                if (local_port <= 0) {
+                    fprintf(stderr, "Invalid local port: %s\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 'r':
+                snprintf(remote_host, sizeof(remote_host), "%s", optarg);
+                break;
+            case 'p':
+                remote_port = atoi(optarg);
+                if (remote_port <= 0) {
+                    fprintf(stderr, "Invalid remote port: %s\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [-b port] [-r host] [-p port]\n", argv[0]);
+                exit(EXIT_FAILURE);
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -66,7 +94,7 @@ int main(int argc, char *argv[]) {
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(LOCAL_PORT_TO_CLIENT);
+    server_addr.sin_port = htons(local_port);
 
     if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         perror("bind failed");
@@ -81,7 +109,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    printf("Proxy server listening on port %d\n", LOCAL_PORT_TO_CLIENT);
+    printf("Proxy server listening on port %d\n", local_port);
 
     while (1) {
         client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
@@ -140,10 +168,11 @@ int file_exists(const char *filename) {
 // Consider: URL decoding, default files, routing logic for different file types
 void handle_request(SSL *ssl) {
     char buffer[BUFFER_SIZE];
+    char decoded_path[BUFFER_SIZE];
     ssize_t bytes_read;
 
-    // TODO: Read request from SSL connection
     bytes_read = 0;
+    bytes_read = SSL_read(ssl, buffer, BUFFER_SIZE - 1);
     
     if (bytes_read <= 0) {
         return;
@@ -155,12 +184,19 @@ void handle_request(SSL *ssl) {
     
     char *method = strtok(request, " ");
     char *file_name = strtok(NULL, " ");
-    file_name++;
-    if (strlen(file_name) == 0) {
-        strcat(file_name, "index.html");
+    if (file_name == NULL) {
+        free(request);
+        return;
+    } 
+    if(file_name[0] == '/'){
+        file_name = file_name + 1;
     }
-    char *http_version = strtok(NULL, " ");
+    
+    url_decode(file_name, decoded_path, sizeof(decoded_path));
+    file_name = decoded_path;
 
+    char *http_version = strtok(NULL, " ");
+    printf("DEBUG: file_name %s\n", file_name);
     if (file_exists(file_name)) {
         printf("Sending local file %s\n", file_name);
         send_local_file(ssl, file_name);
@@ -168,6 +204,29 @@ void handle_request(SSL *ssl) {
         printf("Proxying remote file %s\n", file_name);
         proxy_remote_file(ssl, buffer);
     }
+    free(request);
+}
+//helps the server not struggle with spaces or percents in a url. If it sees a %, it'll 
+//try to treat the % and next 2 chars as hex byte. else, copy as-is
+void url_decode(const char *src, char *dst, size_t dst_size) {
+    size_t di = 0;
+    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_size; ++si) {
+        if (src[si] == '%' && src[si + 1] != '\0' && src[si + 2] != '\0') {
+            char hex[3];
+            hex[0] = src[si + 1];
+            hex[1] = src[si + 2];
+            hex[2] = '\0';
+            char *end = NULL;
+            long val = strtol(hex, &end, 16);
+            if (end != NULL && *end == '\0') {
+                dst[di++] = (char)val;
+                si += 2;
+                continue;
+            }
+        }
+        dst[di++] = src[si];
+    }
+    dst[di] = '\0';
 }
 
 // TODO: Serve local file with correct Content-Type header
@@ -183,7 +242,7 @@ void send_local_file(SSL *ssl, const char *path) {
                          "Content-Type: text/html; charset=UTF-8\r\n\r\n"
                          "<!DOCTYPE html><html><head><title>404 Not Found</title></head>"
                          "<body><h1>404 Not Found</h1></body></html>";
-        // TODO: Send response via SSL
+        SSL_write(ssl, response, (int)strlen(response));
         
         return;
     }
@@ -192,16 +251,28 @@ void send_local_file(SSL *ssl, const char *path) {
     if (strstr(path, ".html")) {
         response = "HTTP/1.1 200 OK\r\n"
                    "Content-Type: text/html; charset=UTF-8\r\n\r\n";
+    } else if (strstr(path, ".txt")) {
+        response = "HTTP/1.1 200 OK\r\n"
+                   "Content-Type: text/plain; charset=UTF-8\r\n\r\n";
+    } else if (strstr(path, ".jpg")) {
+        response = "HTTP/1.1 200 OK\r\n"
+                   "Content-Type: image/jpeg\r\n\r\n";
+    } else if (strstr(path, ".m3u8")) {
+        response = "HTTP/1.1 200 OK\r\n"
+                   "Content-Type: application/vnd.apple.mpegurl\r\n\r\n";
+    } else if (!strchr(path, '.')) {
+        response = "HTTP/1.1 200 OK\r\n"
+                   "Content-Type: application/octet-stream\r\n\r\n";
     } else {
         response = "HTTP/1.1 200 OK\r\n"
                    "Content-Type: text/plain; charset=UTF-8\r\n\r\n";
     }
 
-    // TODO: Send response header and file content via SSL
+    SSL_write(ssl, response, (int)strlen(response));
     
 
     while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        // TODO: Send file data via SSL
+        SSL_write(ssl, buffer, (int)bytes_read);
         
     }
 
@@ -223,8 +294,8 @@ void proxy_remote_file(SSL *ssl, const char *request) {
     }
 
     remote_addr.sin_family = AF_INET;
-    inet_pton(AF_INET, REMOTE_HOST, &remote_addr.sin_addr);
-    remote_addr.sin_port = htons(REMOTE_PORT);
+    inet_pton(AF_INET, remote_host, &remote_addr.sin_addr);
+    remote_addr.sin_port = htons(remote_port);
 
     if (connect(remote_socket, (struct sockaddr*)&remote_addr, sizeof(remote_addr)) == -1) {
         printf("Failed to connect to remote server\n");

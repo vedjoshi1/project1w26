@@ -307,6 +307,7 @@ void proxy_remote_file(SSL *ssl, const char *request) {
 
     while ((bytes_read = recv(remote_socket, buffer, sizeof(buffer), 0)) > 0) {
         // TODO: Forward response to client via SSL
+        SSL_write(ssl, buffer, (int)bytes_read);
         
     }
 
